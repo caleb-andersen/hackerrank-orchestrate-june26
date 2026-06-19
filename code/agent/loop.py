@@ -154,8 +154,14 @@ def run_claim(
     available_image_ids: list[str],
     max_iters: int = MAX_LOOP_ITERS,
     max_tokens: int = 3000,
+    instrument: Any = None,
 ) -> dict[str, str]:
-    """Run one claim through the tool loop; return a 14-column row + `_routing`."""
+    """Run one claim through the tool loop; return a 14-column row + `_routing`.
+
+    `instrument` (optional) is a `code/instrument.py` Instrument; when supplied
+    each synthesis call's token usage is recorded for the P4 operational report.
+    It is pure accounting and never affects the decision.
+    """
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
         {
@@ -215,6 +221,8 @@ def run_claim(
             return row_out
 
         synth_calls += 1
+        if instrument is not None:
+            instrument.record_call(synth_model, getattr(response, "usage", None))
         message = response.choices[0].message
 
         if not message.tool_calls:

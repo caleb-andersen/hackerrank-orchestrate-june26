@@ -48,13 +48,20 @@ _LOGIC_VERSION = "p3.1"
 INPUT_COLUMNS = ["user_id", "image_paths", "user_claim", "claim_object"]
 
 
-def _prompt_fingerprint() -> str:
-    """Hash the live prompts + model names so any edit busts the cache."""
+def _prompt_fingerprint(
+    synth_model: str = SYNTHESIS_MODEL,
+    inspect_model: str = INSPECTION_MODEL,
+) -> str:
+    """Hash the live prompts + the models actually in use so any edit (or a
+    bake-off model swap) busts the cache. The model names are arguments, not the
+    config defaults, so a gpt-4.1-synthesis run and a gpt-5.4-synthesis run get
+    distinct fingerprints and never share cached rows.
+    """
     blob = "\x00".join(
         [
             _LOGIC_VERSION,
-            SYNTHESIS_MODEL,
-            INSPECTION_MODEL,
+            synth_model,
+            inspect_model,
             SYNTHESIS_SYSTEM_PROMPT,
             INSPECTION_SYSTEM_PROMPT,
         ]
@@ -86,7 +93,9 @@ def _save_cache(cache: dict[str, Any]) -> None:
     )
 
 
-def _make_inspect_fn(row: dict[str, str], client: Any, model: str) -> Callable[[str], dict]:
+def _make_inspect_fn(
+    row: dict[str, str], client: Any, model: str, instrument: Any = None
+) -> Callable[[str], dict]:
     """Bind inspect_image to this row's resolved images (image_id -> path)."""
     id_to_path = {image_id: path for image_id, path in resolve_images(row["image_paths"])}
     claim_object = row.get("claim_object", "")
@@ -99,7 +108,10 @@ def _make_inspect_fn(row: dict[str, str], client: Any, model: str) -> Callable[[
                 "readable": False,
                 "notes": f"unknown image id {image_id!r}",
             }
-        return inspect_image(image_id, path, claim_object, client=client, model=model)
+        return inspect_image(
+            image_id, path, claim_object, client=client, model=model,
+            instrument=instrument,
+        )
 
     return inspect
 
@@ -110,14 +122,24 @@ def make_predictor(
     use_cache: bool = True,
     synth_model: str = SYNTHESIS_MODEL,
     inspect_model: str = INSPECTION_MODEL,
+    instrument: Any = None,
 ) -> Callable[[dict[str, str]], dict[str, str]]:
     """Return a `predict(row) -> dict` closure backed by the real agent.
 
     Caching is per-row and keyed on the input + live prompt fingerprint, so
     tuning the prompts re-runs every row, while re-scoring identical config
     costs nothing.
+
+    `instrument` (optional) accumulates real token/cost/latency across the run
+    for the P4 operational report. NOTE: cached rows make no live call, so they
+    contribute nothing to the instrument — pass `use_cache=False` (as the
+    bake-off does) when you need a complete operational snapshot.
+
+    The cache key already includes both model names (via the prompt
+    fingerprint), so swapping `synth_model` is a clean cache miss — gpt-4.1 and
+    gpt-5.4 synthesis runs never collide.
     """
-    fingerprint = _prompt_fingerprint()
+    fingerprint = _prompt_fingerprint(synth_model, inspect_model)
     cache = _load_cache() if use_cache else {}
 
     def predict(row: dict[str, str]) -> dict[str, str]:
@@ -130,10 +152,11 @@ def make_predictor(
             row,
             client=client,
             synth_model=synth_model,
-            inspect_fn=_make_inspect_fn(row, client, inspect_model),
+            inspect_fn=_make_inspect_fn(row, client, inspect_model, instrument),
             evidence_fn=get_evidence_requirement,
             history_fn=get_user_history,
             available_image_ids=available_ids,
+            instrument=instrument,
         )
         if use_cache:
             cache[key] = decision

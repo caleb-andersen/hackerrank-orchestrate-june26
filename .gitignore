@@ -8,6 +8,9 @@ output.csv
 code/azure_probe_report.json
 code/evaluation/.pred_cache.json
 code/evaluation/sample_predictions.csv
+# runtime operational snapshot (live token/cost capture); the committed
+# evaluation_report.md already bakes its numbers in. bakeoff_report.md IS committed.
+code/evaluation/operational_snapshot.json
 .DS_Store
 # never commit the transcript log (it lives in ~/hackerrank_orchestrate anyway)
 log.txt

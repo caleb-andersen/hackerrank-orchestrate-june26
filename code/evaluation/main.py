@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -31,12 +32,21 @@ def _load_dotenv() -> None:
             os.environ[key] = val
 
 
-from config import OUTPUT_COLUMNS, SAMPLE_CLAIMS_CSV  # noqa: E402
+from config import (  # noqa: E402
+    INSPECTION_MODEL,
+    OUTPUT_COLUMNS,
+    SAMPLE_CLAIMS_CSV,
+    SYNTHESIS_MODEL,
+)
 from io_utils import INPUT_COLUMNS, image_ids, read_claims  # noqa: E402
 from metrics import normalize, score_all  # noqa: E402
 
 
 REPORT_PATH = Path(__file__).resolve().parent / "evaluation_report.md"
+# Written by code/evaluation/bakeoff.py: the chosen model's real per-model
+# call/token/cost/latency snapshot. When present, the operational section below
+# renders real numbers instead of placeholders (gitignored runtime artifact).
+OPERATIONAL_SNAPSHOT_PATH = Path(__file__).resolve().parent / "operational_snapshot.json"
 CLAIM_STATUS_LABELS = ["supported", "contradicted", "not_enough_information"]
 
 
@@ -212,6 +222,134 @@ def _print_mismatches(
     print()
 
 
+_OPERATIONAL_PLACEHOLDER = [
+    "## Operational Analysis",
+    "",
+    "_Placeholder — run `python evaluation/bakeoff.py` to capture real "
+    "call/token/cost/latency numbers (writes `operational_snapshot.json`), then "
+    "regenerate this report._",
+    "",
+    "- Model calls: instrumented per-model token/cost accounting via code/instrument.py.",
+    "- Token usage: captured by instrument.record_call on each synthesis/inspection call.",
+    "- Images processed: see routing counts above (inspect_calls per row via _routing).",
+    "- Approximate cost: derived from instrument.snapshot() PRICING.",
+    "- Latency/runtime: wall-clock captured by instrument.track().",
+    "- TPM/RPM considerations: batching, throttling, retry, and cache notes added once a run lands.",
+    "",
+]
+
+
+def _operational_lines() -> list[str]:
+    """Real operational section from the bake-off snapshot, or a placeholder.
+
+    The numbers come from `operational_snapshot.json` (written by bakeoff.py over
+    a live, un-cached run of every sample), so they are real per-model token/
+    cost/latency — not estimates of estimates.
+    """
+    if not OPERATIONAL_SNAPSHOT_PATH.is_file():
+        return list(_OPERATIONAL_PLACEHOLDER)
+    try:
+        data = json.loads(OPERATIONAL_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        snap = data["snapshot"]
+        routing = data["routing"]
+        n_rows = int(data["n_rows"])
+    except (json.JSONDecodeError, OSError, KeyError):
+        return list(_OPERATIONAL_PLACEHOLDER)
+
+    chosen = data.get("chosen_synth_model", "?")
+    inspect_model = data.get("inspect_model", "?")
+    models = snap["models"]
+    totals = snap["totals"]
+    wall = snap.get("timings_seconds", {}).get("wall", 0.0)
+    n = max(n_rows, 1)
+
+    model_rows = [
+        [
+            model,
+            counts["calls"],
+            counts["prompt_tokens"],
+            counts["completion_tokens"],
+            counts["cost_usd"],
+        ]
+        for model, counts in models.items()
+    ]
+    model_rows.append(
+        [
+            "TOTAL",
+            totals["calls"],
+            totals["prompt_tokens"],
+            totals["completion_tokens"],
+            totals["cost_usd"],
+        ]
+    )
+
+    inspect_calls = int(routing.get("inspect_calls", 0))
+    total_tokens = totals["prompt_tokens"] + totals["completion_tokens"]
+    # Simple linear projection to the full claims.csv (44 rows). Per-row averages
+    # from this 20-row sample run; a rigorous standalone projection (with TPM/RPM
+    # headroom) lives in evaluation/cost_projection.py.
+    full_rows = 44
+    scale = full_rows / n
+    throughput_rows = [
+        ["samples scored (live, un-cached)", n_rows],
+        ["wall-clock (s)", round(wall, 1)],
+        ["seconds / claim", round(wall / n, 2)],
+        ["images inspected (vision calls)", inspect_calls],
+        ["synthesis calls", int(routing.get("synth_calls", 0))],
+        ["total tokens", total_tokens],
+        ["tokens / claim", round(total_tokens / n, 1)],
+        ["est. cost / claim (USD)", round(totals["cost_usd"] / n, 5)],
+        [f"projected cost for full claims.csv ({full_rows} rows, USD)",
+         round(totals["cost_usd"] * scale, 4)],
+        [f"projected runtime for full claims.csv ({full_rows} rows, s)",
+         round(wall * scale, 1)],
+    ]
+
+    return [
+        "## Operational Analysis",
+        "",
+        f"Real per-model usage captured by `code/instrument.py` over a **live, "
+        f"un-cached** run of all {n_rows} samples "
+        f"(synthesis=`{chosen}`, inspection=`{inspect_model}`), produced by a "
+        "live `evaluation/main.py --no-cache` (or `bakeoff.py`) run. The "
+        "synthesis-model bake-off comparison is in `bakeoff_report.md`.",
+        "",
+        "### Per-model calls, tokens, cost",
+        "",
+        _markdown_table(
+            ["model", "calls", "prompt_tokens", "completion_tokens", "cost_usd"],
+            model_rows,
+        ),
+        "",
+        "Cost uses the assumed per-1K-token `PRICING` in `code/instrument.py` "
+        "(planning estimate, not a billing source of truth).",
+        "",
+        "### Throughput, latency, projected cost",
+        "",
+        _markdown_table(["metric", "value"], throughput_rows),
+        "",
+        "### TPM/RPM, retries, caching",
+        "",
+        f"- **Tiering (decision #6):** the expensive reasoner drives only the "
+        f"synthesis/decision loop ({int(routing.get('synth_calls', 0))} calls "
+        f"across {n_rows} claims, including bounded re-inspection rounds), while "
+        f"the cheap vision model absorbs the high-volume {inspect_calls} image "
+        "inspections — see the per-model cost split above for why that split "
+        "matters.",
+        "- **Caching:** `evaluation/agent_predictor.py` caches per-row "
+        "predictions keyed on inputs + a prompt/model fingerprint, and "
+        "`instrument.InspectionCache` keys inspections by path+content-hash, so "
+        "re-scoring an unchanged config costs zero Azure calls. These operational "
+        "numbers come from a cache-OFF run precisely so they are complete.",
+        "- **Retries/throughput:** the Azure SDK backs off on 429 (TPM/RPM) "
+        "throttles; the loop is bounded by `MAX_LOOP_ITERS` and "
+        "every model/parse failure degrades to a safe "
+        "`not_enough_information + manual_review_required` row rather than "
+        "raising, so a TPM/RPM throttle slows the run but never corrupts output.",
+        "",
+    ]
+
+
 def _render_report(report: dict[str, Any], intro: str, title: str) -> str:
     accuracy_rows = [
         [item["field"], item["correct"], item["n"], item["accuracy"]]
@@ -351,26 +489,69 @@ def _render_report(report: dict[str, Any], intro: str, title: str) -> str:
                 ],
             ),
             "",
-            "## Operational Analysis Placeholders",
-            "",
-            "- Model calls: instrumented per-model token/cost accounting lands in P4 (code/instrument.py).",
-            "- Token usage: placeholder; wire instrument.record_call into the loop in P4.",
-            "- Images processed: see routing counts above (inspect_calls per row via _routing).",
-            "- Approximate cost: placeholder; derive from instrument.snapshot() PRICING in P4.",
-            "- Latency/runtime: see the wall-clock printed by the harness run.",
-            "- TPM/RPM considerations: placeholder; add batching, throttling, retry, and cache notes in P4.",
-            "",
+            *_operational_lines(),
         ]
     )
 
 
-def _build_predictor(use_cache: bool):
+def _build_predictor(use_cache: bool, instrument: Any = None):
     """Real agent predictor over the Azure client (default eval path, P3+)."""
     _load_dotenv()
     from config import azure_client  # noqa: E402 - lazy: stub mode needs no SDK
     from agent_predictor import make_predictor  # noqa: E402
 
-    return make_predictor(azure_client(), use_cache=use_cache)
+    return make_predictor(azure_client(), use_cache=use_cache, instrument=instrument)
+
+
+def _aggregate_routing(predictions: list[dict[str, Any]]) -> dict[str, int]:
+    """Sum per-row `_routing` into run totals (for the operational snapshot)."""
+    totals = {
+        "synth_calls": 0,
+        "inspect_calls": 0,
+        "images_available": 0,
+        "early_stop": 0,
+        "reinspected": 0,
+        "label_flipped": 0,
+    }
+    for pred in predictions:
+        routing = pred.get("_routing", {})
+        totals["synth_calls"] += int(routing.get("synth_calls", 0))
+        totals["inspect_calls"] += int(routing.get("inspect_calls", 0))
+        totals["images_available"] += int(routing.get("images_available", 0))
+        totals["early_stop"] += int(bool(routing.get("early_stop")))
+        totals["reinspected"] += int(bool(routing.get("reinspected")))
+        totals["label_flipped"] += int(bool(routing.get("label_flipped")))
+    return totals
+
+
+def _dump_operational_snapshot(
+    instrument: Any, predictions: list[dict[str, Any]], n_rows: int
+) -> None:
+    """Persist this run's real per-model usage for the operational section.
+
+    Only meaningful after a full live (`--no-cache`) run — cached rows make no
+    call, so the snapshot would otherwise undercount. Reflects the SHIPPED
+    models (config.SYNTHESIS_MODEL / INSPECTION_MODEL) so the report's operational
+    numbers match its confusion matrix.
+    """
+    OPERATIONAL_SNAPSHOT_PATH.write_text(
+        json.dumps(
+            {
+                "chosen_synth_model": SYNTHESIS_MODEL,
+                "inspect_model": INSPECTION_MODEL,
+                "n_rows": n_rows,
+                "snapshot": instrument.snapshot(),
+                "routing": _aggregate_routing(predictions),
+                "verdict": (
+                    "shipped config; synthesis-model bake-off is in bakeoff_report.md"
+                ),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"Wrote {OPERATIONAL_SNAPSHOT_PATH}")
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -397,6 +578,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     gold = read_claims(SAMPLE_CLAIMS_CSV)
 
+    instrument = None
     if args.offline:
         predictor = predict
         title = "Evaluation Report (offline stub)"
@@ -405,16 +587,31 @@ def main(argv: list[str] | None = None) -> int:
             "the harness without Azure; numbers here are not the real agent."
         )
     else:
-        predictor = _build_predictor(use_cache=not args.no_cache)
+        # Capture real usage only on a full live run; cached rows make no call.
+        if args.no_cache:
+            from instrument import Instrument  # lazy: stub mode needs no SDK path
+
+            instrument = Instrument()
+        predictor = _build_predictor(use_cache=not args.no_cache, instrument=instrument)
         title = "Evaluation Report — agent on sample_claims.csv"
         intro = (
             "Generated by the real tool-calling agent "
             "(`agent.loop.run_claim`) over the 20 labelled samples. The headline "
             "metric is the claim_status 3x3 confusion matrix; contradicted vs "
-            "not_enough_information is the discrimination that earns the design."
+            "not_enough_information is the discrimination that earns the design.\n\n"
+            "The agent is non-deterministic: repeated gpt-5.4 runs of this same "
+            "config scored claim_status 15-17/20 (the contradicted<->NEI cells "
+            "stay 0 across runs). The matrix below is the warm-cache canonical "
+            "run; the Operational Analysis numbers come from a separate live, "
+            "un-cached run (so token/cost/latency are complete), which is why "
+            "its sampling may differ by a row."
         )
 
-    predictions = [predictor(_input_only(row)) for row in gold]
+    if instrument is not None:
+        with instrument.track("wall"):
+            predictions = [predictor(_input_only(row)) for row in gold]
+    else:
+        predictions = [predictor(_input_only(row)) for row in gold]
 
     for prediction in predictions:
         extra_columns = set(prediction) - set(OUTPUT_COLUMNS) - {"_routing"}
@@ -434,6 +631,8 @@ def main(argv: list[str] | None = None) -> int:
     _print_routing(report)
     if not args.no_mismatches:
         _print_mismatches(gold, predictions)
+    if instrument is not None:
+        _dump_operational_snapshot(instrument, predictions, len(gold))
     REPORT_PATH.write_text(_render_report(report, intro, title), encoding="utf-8")
     print(f"Wrote {REPORT_PATH}")
     return 0

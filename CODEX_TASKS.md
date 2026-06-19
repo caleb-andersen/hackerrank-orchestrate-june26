@@ -358,6 +358,84 @@ column pair. Gitignored already. Pure stdlib + `io_utils`. `__main__` runs it.
 
 ---
 
+## P4-CX — operational reporting: persistence + cost projection
+
+Context: Claude Code owns the P4 judgment + live work and it has landed. The
+`Instrument` (token/cost/latency) is now threaded through the real call path —
+`tools/inspect_image.py`, `agent/loop.run_claim`, and
+`evaluation/agent_predictor.make_predictor` all take an optional `instrument=`
+and call `instrument.record_call(model, response.usage)` on every synthesis /
+inspection call. The **bake-off** (`code/evaluation/bakeoff.py`) runs the agent
+over the samples once per synthesis model (`gpt-4.1` vs `gpt-5.4`, inspection
+fixed at `gpt-4.1`), captures real call/token/cost/latency, writes
+`bakeoff_report.md` (committed) with the model-tiering recommendation, and dumps
+the chosen model's snapshot to `code/evaluation/operational_snapshot.json`
+(gitignored). `evaluation/main.py` renders that snapshot into the
+`## Operational Analysis` section of `evaluation_report.md`.
+
+**Important — you cannot run the live pieces.** This environment has no `openai`
+package and no Azure creds, so do **not** try to run `bakeoff.py` or the default
+`evaluation/main.py`. Your P4-CX work is entirely **offline, deterministic,
+stdlib-only**, and must not require a live run to self-test (fabricate a snapshot
+dict in your `__main__`). It is additive — do not change the loop, the predictor,
+the bake-off, or the instrument wiring CC added.
+
+### P4-CX-1 — persistence helpers in `code/instrument.py`
+
+You own `instrument.py`. Add JSON persistence so snapshots survive across
+processes and the inspection cache can be reused between runs (the spec for this
+module always called the on-disk cache layer a nice-to-have; P4 is when it pays
+off — a warm `InspectionCache` means re-runs re-inspect zero images).
+
+- `Instrument.to_json() -> str` / `Instrument.save(path)` — serialize the
+  accumulated `_calls` and `_timings` (not just the computed `snapshot()`; keep
+  enough to keep accumulating after a reload).
+- `Instrument.load(path) -> Instrument` (classmethod) / `from_json(text)` —
+  reconstruct an `Instrument` whose `record_call`/`snapshot` keep working.
+- `Instrument.merge(other) -> None` — fold another Instrument's counts/timings
+  in (so several partial runs can be combined into one operational total).
+- `InspectionCache.save(path)` / `InspectionCache.load(path, use_content_hash=…)`
+  — JSON-on-disk layer keyed exactly as today (abs path + optional content
+  hash). A missing/corrupt file loads to an empty cache, never raises.
+- Keep the existing `record_call`/`snapshot`/`track`/`key_for` behavior and the
+  module-level `instrument` / `inspection_cache` singletons unchanged.
+- Extend `__main__`: round-trip an Instrument (record → save → load → snapshot
+  equal), a merge (two Instruments → summed totals), and a cache save/load.
+- **Do not** change `PRICING` values without a cited source; they are documented
+  planning estimates and CC's reports lean on them.
+
+### P4-CX-2 — `code/evaluation/cost_projection.py`
+
+A standalone, offline projection from the 20-sample live run to the full
+`claims.csv` (44 rows) — the "what will the real test set cost / how long / will
+it fit TPM-RPM" analysis the problem-statement operational section wants. CC's
+`evaluation_report.md` carries a one-line linear estimate; this is the rigorous
+version it points to.
+
+- Read `code/evaluation/operational_snapshot.json` (written by `bakeoff.py`). If
+  it is absent, print a clear `run evaluation/bakeoff.py first` message and exit
+  0 — never crash, never hit the network.
+- Read the full test-set row count from `claims.csv` via `io_utils`
+  (`config.CLAIMS_CSV`) — **do not hardcode 44**; data_audit already asserts it.
+  Read the sample row count from the snapshot (`n_rows`).
+- Project, with a clearly documented scaling assumption (linear in rows; per-row
+  token/cost/latency averages from the sample run): total calls, prompt/
+  completion/total tokens, cost (per model and grand total, using the snapshot's
+  already-computed per-model cost), wall-clock runtime.
+- Add a **TPM/RPM headroom** check: from the projected tokens and runtime,
+  estimate peak tokens-per-minute and requests-per-minute and compare against
+  configurable assumed deployment limits (module constants with a documented
+  default, e.g. `ASSUMED_TPM`, `ASSUMED_RPM`); report headroom / whether
+  throttling/backoff is expected and the cache's mitigating effect.
+- Print a readable table and **append/write** a `## Full-Test-Set Cost
+  Projection` section to `evaluation_report.md` *or* write a sibling
+  `cost_projection.md` — pick the sibling file to avoid racing CC's
+  `evaluation_report.md` writer (cleaner; CC's report can link it).
+- Pure stdlib + `io_utils`. `__main__` runs it; the self-test path must work off
+  a fabricated snapshot dict so it passes with no live artifacts present.
+
+---
+
 ## Later phases (specs to be expanded when we reach them)
 
 - **P5-CX** schema/column-order validator pass over the final `output.csv`

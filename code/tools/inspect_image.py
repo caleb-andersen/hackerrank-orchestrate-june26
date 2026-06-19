@@ -91,11 +91,16 @@ def inspect_image(
     client: Any,
     model: str,
     max_tokens: int = 600,
+    instrument: Any = None,
 ) -> dict[str, Any]:
     """Inspect one image and return a structured observation dict.
 
     Never raises: file/model/parse failures degrade to an "unreadable"
     observation so the agent loop can keep going.
+
+    `instrument` (optional) is a `code/instrument.py` Instrument; when supplied
+    we record this call's token usage so the P4 operational report has real
+    per-model numbers. It never changes the observation, only accounting.
     """
     path = Path(image_path)
     if not path.is_file():
@@ -127,6 +132,8 @@ def inspect_image(
             response_format={"type": "json_object"},
             max_completion_tokens=max_tokens,
         )
+        if instrument is not None:
+            instrument.record_call(model, getattr(response, "usage", None))
         raw = response.choices[0].message.content or "{}"
         parsed = json.loads(raw)
     except json.JSONDecodeError:
