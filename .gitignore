@@ -6,6 +6,8 @@ venv/
 node_modules/
 output.csv
 code/azure_probe_report.json
+code/evaluation/.pred_cache.json
+code/evaluation/sample_predictions.csv
 .DS_Store
 # never commit the transcript log (it lives in ~/hackerrank_orchestrate anyway)
 log.txt

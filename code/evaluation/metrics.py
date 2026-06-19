@@ -20,6 +20,7 @@ COVERAGE_FIELDS = [
     "claim_status_justification",
     "supporting_image_ids",
 ]
+FIELD_CONFUSION_FIELDS = ["issue_type", "severity", "object_part"]
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,38 @@ def claim_status_confusion(
         "macro_f1": macro_f1,
         "contra_as_nei": matrix["contradicted"]["not_enough_information"],
         "nei_as_contra": matrix["not_enough_information"]["contradicted"],
+    }
+
+
+def field_confusion(
+    gold: list[dict[str, Any]],
+    pred: list[dict[str, Any]],
+    field: str,
+) -> dict[str, Any]:
+    """Generic normalized confusion matrix for one categorical field."""
+    gold_values = [normalize(row.get(field)) for row in gold]
+    pred_values = [_row_value(pred, index, field) for index in range(len(gold))]
+    labels = sorted(set(gold_values) | set(pred_values))
+    matrix = {label: {column: 0 for column in labels} for label in labels}
+
+    for gold_value, pred_value in zip(gold_values, pred_values):
+        matrix[gold_value][pred_value] += 1
+
+    per_value: dict[str, dict[str, float | int]] = {}
+    for label in labels:
+        tp = matrix[label][label]
+        fp = sum(matrix[row_label][label] for row_label in labels) - tp
+        fn = sum(matrix[label].values()) - tp
+        per_value[label] = {
+            "support": sum(matrix[label].values()),
+            **_prf(tp + fp, tp + fn, tp),
+        }
+
+    return {
+        "field": field,
+        "labels": labels,
+        "matrix": matrix,
+        "per_value": per_value,
     }
 
 
@@ -239,6 +272,10 @@ def score_all(gold: list[dict[str, Any]], pred: list[dict[str, Any]]) -> dict[st
             exact_match_accuracy(gold, pred, field) for field in EXACT_MATCH_FIELDS
         ],
         "claim_status_confusion": claim_status_confusion(gold, pred),
+        "field_confusions": {
+            field: field_confusion(gold, pred, field)
+            for field in FIELD_CONFUSION_FIELDS
+        },
         "risk_flags_prf": multilabel_prf(gold, pred, "risk_flags"),
         "coverage": coverage_metrics(pred),
         "routing": routing_metrics(pred),
@@ -282,6 +319,31 @@ def _self_test() -> None:
         "reinspection_count": 1,
         "post_reinspection_flip_count": 1,
     }
+
+    field_gold = [
+        {"issue_type": "dent"},
+        {"issue_type": "scratch"},
+        {"issue_type": "dent"},
+        {"issue_type": "unknown"},
+    ]
+    field_pred = [
+        {"issue_type": "dent"},
+        {"issue_type": "dent"},
+        {"issue_type": "unknown"},
+        {"issue_type": "unknown"},
+    ]
+    issue_confusion = field_confusion(field_gold, field_pred, "issue_type")
+    assert issue_confusion["labels"] == ["dent", "scratch", "unknown"]
+    assert issue_confusion["matrix"]["dent"]["dent"] == 1
+    assert issue_confusion["matrix"]["dent"]["unknown"] == 1
+    assert issue_confusion["matrix"]["scratch"]["dent"] == 1
+    assert issue_confusion["matrix"]["unknown"]["unknown"] == 1
+    _assert_close(issue_confusion["per_value"]["dent"]["precision"], 1 / 2)
+    _assert_close(issue_confusion["per_value"]["dent"]["recall"], 1 / 2)
+    _assert_close(issue_confusion["per_value"]["dent"]["f1"], 1 / 2)
+    _assert_close(issue_confusion["per_value"]["unknown"]["precision"], 1 / 2)
+    _assert_close(issue_confusion["per_value"]["unknown"]["recall"], 1.0)
+    _assert_close(issue_confusion["per_value"]["unknown"]["f1"], 2 / 3)
 
 
 if __name__ == "__main__":

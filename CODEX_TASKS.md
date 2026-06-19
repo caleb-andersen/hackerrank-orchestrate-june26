@@ -296,6 +296,68 @@ analysis.
   the integration point with Claude Code (likely `main.py` passing the
   `usage` from each response into `record_call`).
 
+## P3-CX — sample-iteration diagnostics
+
+Context: Claude Code owns the P3 judgment work (reading the claim_status
+confusion matrix and tuning the contradicted-vs-NEI / supported boundary in the
+prompts). That landed: the real agent now runs inside the eval harness
+(`evaluation/agent_predictor.py`, prompt-fingerprinted per-row cache), and
+`evaluation/main.py` prints a per-row gold-vs-pred mismatch diff. As of the P3
+tuning pass: **claim_status 16/20, macro-F1 0.73, and the contradicted/NEI
+confusion cells are both 0** — the remaining misses are supported↔contradicted
+vision close-calls, not reasoning-boundary errors.
+
+Your P3-CX work is the **mechanical diagnostics** that make the next iteration
+(and the P4 operational report) legible. Pure, deterministic, stdlib only. **Do
+not** add any post-hoc overwrite of the agent's fields — the validator
+flags-and-logs, it never silently rewrites (architecture decision #4). These are
+read-only measurement helpers.
+
+### P3-CX-1 — `field_confusion` in `code/evaluation/metrics.py`
+
+Add a generic per-value confusion helper so we can see *where* the lower-scoring
+categorical fields miss (issue_type=0.45, severity=0.35 right now — is the model
+systematically defaulting to `unknown`, or is it noise?).
+
+```python
+def field_confusion(gold: list[dict], pred: list[dict], field: str) -> dict
+```
+- Matched **by file order** (same as every other metric — never by `user_id`).
+- Use the existing `normalize()` for both sides.
+- Return a small, JSON-serializable dict:
+  - `field`
+  - `labels`: sorted union of gold+pred normalized values actually seen.
+  - `matrix`: `{gold_value: {pred_value: count}}` over those labels.
+  - `per_value`: `{value: {support, precision, recall, f1}}` (treat each distinct
+    gold value as a one-vs-rest class; same math as `claim_status_confusion`).
+- **No printing here** — `metrics.py` stays pure. Extend its `__main__`
+  self-test with a tiny hand-checked fixture for one field.
+- Optionally surface it from `score_all` under a `field_confusions` key for
+  `["issue_type", "severity", "object_part"]`, so the report can render them.
+
+### P3-CX-2 — render the field confusions in `code/evaluation/main.py`
+
+- Add a `_print_field_confusion(report, field)` that prints the matrix Claude
+  Code's `_print_confusion` already models (labelled axes), for `issue_type` and
+  `severity`. Presentation only; all computation stays in `metrics.py`.
+- Add the same tables to `_render_report` under a new
+  `## Categorical Field Confusions` section. Keep the existing report sections
+  and the `intro`/`title` parameters intact (P3 added those).
+- Do **not** change the default predictor path, the cache, or the mismatch diff
+  — only add the new section.
+
+### P3-CX-3 — `code/evaluation/dump_predictions.py`
+
+A tiny convenience writer (the cache already holds predictions; this just makes
+them human-diffable). Reads `dataset/sample_claims.csv` (gold) in file order,
+reads the cached real-agent predictions via `agent_predictor` (cache only — do
+**not** trigger Azure calls; if a row is uncached, write its cells as `MISSING`),
+and writes `code/evaluation/sample_predictions.csv` with, per row and in file
+order: `user_id`, then for each scored field a `gold_<field>` / `pred_<field>`
+column pair. Gitignored already. Pure stdlib + `io_utils`. `__main__` runs it.
+
+---
+
 ## Later phases (specs to be expanded when we reach them)
 
 - **P5-CX** schema/column-order validator pass over the final `output.csv`

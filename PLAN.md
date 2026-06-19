@@ -80,9 +80,9 @@ Output: repo-root **`output.csv`**, one row per `claims.csv` row, exact 14-col o
 - **P0** scaffolding + data audit ([CX]) · Azure probe ([CC]) · PLAN.md ([CC]). **Commit 1.**
 - **P1** eval harness FIRST vs samples: metrics + routing metrics ([CX]); metric bar ([CC]). **Commit 2.**
 - **P2** agent core: prompts, inspect_image, loop, synthesis, validator ([CC]); lookups ([CX]). **Commit 3.**
-- **P3** iterate on 20 samples, tune valid_image boundary + contradicted-vs-NEI. **Commit 4.**
-- **P4** ≥2 model configs, pick by accuracy; `evaluation_report.md` + operational analysis. **Commit 5.**
-- **P5** final run on `claims.csv` → `output.csv`; submission hygiene + merged transcript. **Commit 6.**
+- **P3** sweep harness over 20 samples ([CX]); tune valid_image boundary + contradicted-vs-NEI from the table, log every regression ([CC]/owner). **Commit 4.**
+- **P4** dual-config runner → side-by-side accuracy/cost/latency table ([CX]); pick by accuracy + write evaluation_report.md & operational analysis ([CC]/owner). **Commit 5.**
+- **P5** log-merge + schema/diff validators ([CX]); final run, submission hygiene, transcript narrative & interview prep ([CC]/owner). **Commit 6.**
 
 ---
 

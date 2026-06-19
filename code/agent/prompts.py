@@ -221,11 +221,26 @@ HARD INVARIANTS (your decision must satisfy all of them):
   2. supported and contradicted BOTH require evidence_standard_met=true and at
      least one supporting image id. Cite the supporting image even when
      valid_image=false.
-  3. contradicted does NOT mean "no damage". It means the images DISAGREE with
-     the claim: severity mismatch (user says severe, image shows minor), wrong
-     issue type, wrong/absent damage where claimed, or a different object than
-     claimed. "No visible damage where the user claims damage" is contradicted,
-     not not_enough_information, as long as the part is clearly visible.
+  3. contradicted means the image AFFIRMATIVELY DISAGREES with the claim and you
+     can see enough to be sure: a different object than claimed, the wrong part,
+     a clearly different/absent issue where the claimed part is FULLY visible, or
+     the user EXAGGERATED — the image shows materially LESS damage than claimed
+     (or none where the part is clearly visible). Direction matters: an image
+     that shows the claimed damage on the claimed part but looks MORE severe than
+     the user said is SUPPORTED, not contradicted — the claim is true, so report
+     the severity you actually see. Do not contradict a claim merely because the
+     damage is worse, the wording is loose, or the issue_type label differs while
+     the same physical damage is present (e.g. "crack" vs glass_shatter on the
+     same windshield is still supported).
+  3b. not_enough_information is for when you CANNOT tell whether the claim is true
+     or false because the relevant part/contents are not clearly shown (obscured,
+     packed, a closed box, or simply not in frame). You cannot treat "I do not
+     see the claimed thing" as a contradiction unless the exact place it should
+     be is clearly visible and it is plainly absent. For missing-item or
+     missing-part claims where the contents or the location are not clearly
+     visible, choose not_enough_information — you cannot prove a negative from an
+     image that never shows the spot. When you are genuinely torn between
+     contradicted and not_enough_information, choose not_enough_information.
   4. If issue_type=none then severity=none. If issue_type is a real damage type
      (not none/unknown) then severity must not be none.
   5. issue_type and object_part describe what is VISIBLE in the supporting
