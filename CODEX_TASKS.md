@@ -116,13 +116,95 @@ Output a short PASS/FAIL summary at the end.
 
 ---
 
+## P1-CX-1 — `code/evaluation/metrics.py`
+
+Pure, deterministic scoring. **No network, no model calls, no `openai` import.**
+Stdlib only (plus `io_utils.read_csv_dicts` for loading). Operates on two
+aligned lists of dicts — `gold` (from `sample_claims.csv`) and `pred` (whatever
+the predictor returned) — matched **by file order** (architecture decision #8;
+do not match on `user_id`, it has duplicates). Every function returns a plain
+dict/dataclass so `main.py` can render and serialize it; **printing/formatting
+lives in `main.py`, not here.**
+
+Implement:
+
+- `normalize(value) -> str` — trim, lowercase, collapse internal whitespace.
+  Treat empty / missing / `"none"` consistently so scoring is robust to casing.
+- `exact_match_accuracy(gold, pred, field) -> dict` — per-field exact-match
+  over the **categorical** fields:
+  `evidence_standard_met`, `risk_flags` (see multilabel note), `issue_type`,
+  `object_part`, `claim_status`, `valid_image`, `severity`.
+  Return `{field, n, correct, accuracy}`. (Free-text fields
+  `evidence_standard_met_reason`, `claim_status_justification`,
+  `supporting_image_ids` are **not** exact-match scored — report coverage/
+  non-empty rate only.)
+- `claim_status_confusion(gold, pred) -> dict` — **the headline metric.** Build
+  the full **3×3 confusion matrix** over the fixed label order
+  `["supported", "contradicted", "not_enough_information"]` (rows = gold,
+  cols = pred; include an `"<other>"` bucket only if a prediction is off-vocab).
+  Return the matrix **plus** per-class precision / recall / F1 and macro-F1.
+  **Call out the contradicted ↔ not_enough_information cells explicitly** in the
+  return dict (e.g. `contra_as_nei`, `nei_as_contra`): distinguishing
+  *contradicted* from *not_enough_information* is the actual task — `supported`
+  is comparatively easy, so a high overall accuracy that hides confusion between
+  those two classes is a failing system. This metric is what proves the agent
+  earns its complexity (decisions #3, #4, #5).
+- `multilabel_prf(gold, pred, field="risk_flags") -> dict` — split on `;`,
+  strip, drop the `none` sentinel to the empty set, dedupe to a set per row.
+  Compute **micro and macro** precision / recall / F1 over the label set, plus
+  per-label support. (Same helper must work for any multi-valued field.)
+- `routing_metrics(pred_meta) -> dict` — consume optional per-row routing
+  metadata the predictor may attach (key `_routing` per row, absent for the
+  stub): `early_stop` (bool), `reinspected` (bool), and `label_flipped`
+  (claim_status changed after re-inspection). Return counts:
+  `early_stop_count`, `reinspection_count`, `post_reinspection_flip_count`,
+  with safe zeros when metadata is absent. This is how decision #5 ("collapse
+  the design if routing is flat") gets measured.
+- `score_all(gold, pred) -> dict` — orchestrate the above into one report dict.
+
+Add a `__main__` self-test that fabricates a tiny gold/pred pair (including one
+contradicted-as-NEI error) and asserts the confusion matrix and F1 numbers are
+what you compute by hand.
+
+---
+
+## P1-CX-2 — `code/evaluation/main.py` (stub predictor)
+
+The evaluation entry point (problem statement requires an `evaluation/` folder).
+Wires the harness together **before the real agent exists** (decision #4: eval
+harness first).
+
+- Define the predictor interface explicitly: **`predict(row: dict) -> dict`**
+  returning the 14 output columns for one input row. For P1 ship a **stub**
+  `predict` (clearly named/commented as a placeholder) — e.g. constant or
+  trivial heuristic values drawn only from the **allowed vocab** in
+  `problem_statement.md`. The stub must **not** import `openai` or hit the
+  network; the whole eval must run offline. The real agent will later satisfy
+  this same signature as a drop-in.
+- Read `dataset/sample_claims.csv` via `io_utils` **in file order**; split each
+  row into the 4 input columns (the predictor only sees inputs) and keep the
+  full row as gold.
+- Run `predict` over every row, collect predictions in order, then call
+  `metrics.score_all(gold, pred)`.
+- Print a readable report to stdout: per-field accuracy table, the
+  `claim_status` 3×3 confusion matrix (labelled axes), per-class + macro F1 with
+  the contradicted/NEI confusion called out, `risk_flags` micro/macro P/R/F1,
+  and the routing counts.
+- Also write `code/evaluation/evaluation_report.md` — for P1 a skeleton with the
+  metric tables filled from this run plus **placeholder** sections for the
+  operational analysis (model calls, token usage, images processed, cost,
+  latency, TPM/RPM) the problem statement requires; these get real numbers once
+  instrumentation (P2/P4) lands.
+- Exit 0 always in P1 (it's a measurement tool, not a gate). A pass/fail
+  threshold can be added later once the real agent's baseline is known.
+
+Keep `metrics.py` import-clean: `main.py` does all I/O and presentation,
+`metrics.py` does pure computation, so metrics stay unit-testable.
+
+---
+
 ## Later phases (specs to be expanded when we reach them)
 
-- **P1-CX** `code/evaluation/metrics.py` + `evaluation/main.py`: per-field
-  exact-match accuracy, `claim_status` 3×3 confusion matrix, multi-label
-  precision/recall/F1 for `risk_flags`, plus **routing metrics** (early-stop
-  count, re-inspection count, post-re-inspection label flips). Runs against a
-  predictor interface `predict(row) -> dict` (stub first).
 - **P2-CX** `code/tools/evidence_lookup.py`, `code/tools/history_lookup.py`:
   pure data lookups with an issue→family mapping for evidence requirements.
 - **P2/P4-CX** `code/instrument.py`: call/token/cost/latency counters + a
