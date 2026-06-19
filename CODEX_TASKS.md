@@ -203,12 +203,104 @@ Keep `metrics.py` import-clean: `main.py` does all I/O and presentation,
 
 ---
 
+## P2-CX — agent tool lookups + instrumentation
+
+Claude Code owns the P2 judgment pieces (prompts, `inspect_image`, the loop,
+synthesis, validator) and has already wired these three modules into the agent
+via **dependency injection** — `code/main.py` imports them and passes them into
+`agent/loop.run_claim`. Your job is to make the real implementations behind the
+**exact signatures below**. While they are absent, `main.py` runs on labelled
+fallbacks (`[main] evidence_lookup=fallback history_lookup=fallback`); landing
+your versions flips that to the module names. **Do not change the signatures or
+return-dict keys** without updating this file and `agent/loop.py`.
+
+These are tool results fed to the reasoner as JSON, so keep returns **small and
+flat** (the model reads them). Pure stdlib + `io_utils.read_csv_dicts`. No
+network. Resolve dataset paths from `config` (`EVIDENCE_REQUIREMENTS_CSV`,
+`USER_HISTORY_CSV`). Load each CSV **once** and cache in a module-level dict.
+
+### P2-CX-1 — `code/tools/evidence_lookup.py`
+
+```python
+def get_evidence_requirement(claim_object: str, issue_family: str) -> dict
+```
+- Map `(claim_object, issue_family)` to the closest row(s) in
+  `evidence_requirements.csv`. `issue_family` is a free-ish hint from the model
+  (one of `agent.prompts.EVIDENCE_FAMILY_HINTS`, or a raw `issue_type` like
+  `scratch`/`crack`/`water_damage`). Build a small keyword→`requirement_id` map
+  per object so e.g. car+`dent or scratch`→`REQ_CAR_BODY_PANEL`,
+  car+`crack`/`broken`/`missing`→`REQ_CAR_GLASS_LIGHT_MIRROR`,
+  laptop+`screen`/`keyboard`/`trackpad`→`REQ_LAPTOP_SCREEN_KEYBOARD_TRACKPAD`,
+  package+`crushed`/`torn`/`seal`→`REQ_PACKAGE_EXTERIOR`, etc. Match on
+  substrings so the model's phrasing need not be exact.
+- Return:
+  ```python
+  {
+    "claim_object": claim_object,
+    "issue_family": issue_family,
+    "matched": {            # the best-matching specific requirement, or None
+        "requirement_id": ..., "applies_to": ..., "minimum_image_evidence": ...,
+    },
+    "always_applies": [     # the object-agnostic baselines, same shape as matched
+        REQ_GENERAL_OBJECT_PART, REQ_GENERAL_MULTI_IMAGE, REQ_REVIEW_TRUST,
+    ],
+  }
+  ```
+  If nothing object-specific matches, `matched=None` and rely on
+  `always_applies`. Never raise — unknown object ⇒ `matched=None`.
+- `__main__` self-test: assert a car dent maps to `REQ_CAR_BODY_PANEL` and that
+  `always_applies` always contains the three general rows.
+
+### P2-CX-2 — `code/tools/history_lookup.py`
+
+```python
+def get_user_history(user_id: str) -> dict
+```
+- Index `user_history.csv` by `user_id` (load once). Return a flat dict with:
+  `user_id`, `past_claim_count`, `accept_claim`, `manual_review_claim`,
+  `rejected_claim`, `last_90_days_claim_count`, `history_flags`,
+  `history_summary`, **plus** two derived helper keys:
+  - `"suggests_user_history_risk"`: bool — true when `history_flags` is not
+    `none`/empty, OR `rejected_claim` > 0, OR `manual_review_claim` is a
+    meaningful fraction of `past_claim_count`. (Pick a simple, documented rule.)
+  - `"risk_note"`: one short string summarizing why (or `"no notable risk"`).
+  The reasoner decides `user_history_risk`; you only surface the signal — do not
+  decide the flag for it.
+- Missing `user_id` ⇒ return a safe default
+  (`{"user_id": user_id, "history_flags": "none",
+  "suggests_user_history_risk": False, "risk_note": "no history on record", ...}`),
+  never raise (test rows are all present, but `claims.csv` must not crash on a
+  gap — see `data_audit.py` check #3).
+- `__main__` self-test: a known low-risk user ⇒ `suggests_user_history_risk`
+  False; a fabricated unknown user ⇒ safe default.
+
+### P2-CX-3 — `code/instrument.py`  (start in P2, finish in P4)
+
+Call/token/cost/latency accounting + a per-image inspection cache. Optional for
+the loop to function, required for `evaluation_report.md`'s operational
+analysis.
+- A small `Instrument` object (or module-level singleton) with:
+  - `record_call(model: str, usage)` — accept an OpenAI `usage` object/dict;
+    accumulate `prompt_tokens`, `completion_tokens`, call count **per model**.
+  - `snapshot() -> dict` — totals per model + grand totals, plus a `cost_usd`
+    estimate from a `PRICING` dict (read assumed $/1K in/out per model from a
+    module constant; document the assumption).
+  - timing helpers (context manager `track()` or start/stop) for wall-clock.
+- `InspectionCache`: keyed by **absolute image path** (optionally + a content
+  hash via `hashlib` so identical bytes share a result). `get(key)` /
+  `set(key, observation)`. Intended to wrap `tools.inspect_image.inspect_image`
+  so duplicate inspections of the same file (re-runs, repeated tool calls) cost
+  nothing. Keep it in-memory; a JSON-on-disk layer is a nice-to-have.
+- Wiring note: `agent/loop.run_claim` already returns per-row `synth_calls` /
+  `inspect_calls` in `_routing`; `instrument` adds the token/cost layer. Coordinate
+  the integration point with Claude Code (likely `main.py` passing the
+  `usage` from each response into `record_call`).
+
 ## Later phases (specs to be expanded when we reach them)
 
-- **P2-CX** `code/tools/evidence_lookup.py`, `code/tools/history_lookup.py`:
-  pure data lookups with an issue→family mapping for evidence requirements.
-- **P2/P4-CX** `code/instrument.py`: call/token/cost/latency counters + a
-  per-image inspection cache keyed by image path/hash.
-- **P5-CX** schema/column-order validator pass over the final `output.csv`.
+- **P5-CX** schema/column-order validator pass over the final `output.csv`
+  (separate from `code/validate.py`, which validates per-row in the pipeline):
+  a standalone check that the emitted file has exactly the 14 columns in order,
+  44 rows, and only allowed vocab — a last gate before submission.
 
 Full specs for these will be appended here before each phase.

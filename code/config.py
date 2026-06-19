@@ -34,11 +34,15 @@ AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_API_VERSION = os.environ.get(
     "AZURE_OPENAI_API_VERSION",
-    "2024-10-21",
+    "2025-01-01-preview",
 )
 
-INSPECTION_MODEL = os.environ.get("INSPECTION_MODEL", "gpt-4o")
-SYNTHESIS_MODEL = os.environ.get("SYNTHESIS_MODEL", "gpt-4o")
+# Pinned from probe_azure.py (code/azure_probe_report.json): this resource
+# exposes gpt-5.4 (reasoner) and gpt-4.1 (vision), both text+vision capable.
+# Cheap vision handles the high-volume per-image inspection; the stronger
+# reasoner runs the single synthesis/decision loop (decision #6).
+INSPECTION_MODEL = os.environ.get("INSPECTION_MODEL", "gpt-4.1")
+SYNTHESIS_MODEL = os.environ.get("SYNTHESIS_MODEL", "gpt-5.4")
 
 MAX_LOOP_ITERS = 8
 MAX_RETRIES = 4
@@ -47,11 +51,17 @@ MAX_RETRIES = 4
 def azure_client():
     from openai import AzureOpenAI
 
+    # Read at call time, not import time: callers (e.g. main.py) may load a
+    # .env into os.environ after this module is first imported.
+    endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+    api_key = os.environ.get("AZURE_OPENAI_API_KEY")
+    api_version = os.environ.get("AZURE_OPENAI_API_VERSION", AZURE_OPENAI_API_VERSION)
+
     missing = [
         name
         for name, value in (
-            ("AZURE_OPENAI_ENDPOINT", AZURE_OPENAI_ENDPOINT),
-            ("AZURE_OPENAI_API_KEY", AZURE_OPENAI_API_KEY),
+            ("AZURE_OPENAI_ENDPOINT", endpoint),
+            ("AZURE_OPENAI_API_KEY", api_key),
         )
         if not value
     ]
@@ -61,7 +71,7 @@ def azure_client():
             f"Missing Azure OpenAI environment variable(s): {missing_list}"
         )
     return AzureOpenAI(
-        azure_endpoint=AZURE_OPENAI_ENDPOINT,
-        api_key=AZURE_OPENAI_API_KEY,
-        api_version=AZURE_OPENAI_API_VERSION,
+        azure_endpoint=endpoint,
+        api_key=api_key,
+        api_version=api_version,
     )
