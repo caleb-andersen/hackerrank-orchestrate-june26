@@ -148,6 +148,22 @@ Cost uses the assumed per-1K-token `PRICING` in `code/instrument.py` (planning e
 | projected cost for full claims.csv (44 rows, USD) | 1.615 |
 | projected runtime for full claims.csv (44 rows, s) | 565.800 |
 
+### Actual full-test-set run (44 rows, claims.csv)
+
+The live `python code/main.py` run over all 44 test rows confirms the projection
+above: **172 model calls** (90 synthesis + 82 inspection), **575.8 s** wall-clock
+vs the 565.8 s projected from the 20-sample run — a ~1.8% overshoot, so the
+linear-in-rows scaling assumption holds. Routing was **not flat**: re-inspection
+fired on **31/44** rows (early-stop 0; no re-inspection flipped a final
+`claim_status` on this set, i.e. re-inspection corroborated rather than overturned
+— the conflict-driven mechanism is exercised, decision #5). The whole-file gate
+(`evaluation/validate_output.py`) passed with 0 hard problems; the validator
+surfaced **2/44 (4.5%)** rows with internal-consistency flags, left in place
+rather than overwritten (decision #4). Token/cost are not re-tabulated here
+because `main.py` does not thread `instrument` by default — the per-token numbers
+above (from the cache-OFF sample run) remain the costing basis, and the call/
+runtime totals match the projection.
+
 ### TPM/RPM, retries, caching
 
 - **Tiering (decision #6):** the expensive reasoner drives only the synthesis/decision loop (40 calls across 20 claims, including bounded re-inspection rounds), while the cheap vision model absorbs the high-volume 29 image inspections — see the per-model cost split above for why that split matters.

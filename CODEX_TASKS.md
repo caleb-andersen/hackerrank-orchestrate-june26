@@ -436,11 +436,102 @@ version it points to.
 
 ---
 
-## Later phases (specs to be expanded when we reach them)
+## P5-CX — final submission gates: whole-file output validator + transcript merge
 
-- **P5-CX** schema/column-order validator pass over the final `output.csv`
-  (separate from `code/validate.py`, which validates per-row in the pipeline):
-  a standalone check that the emitted file has exactly the 14 columns in order,
-  44 rows, and only allowed vocab — a last gate before submission.
+Context: Claude Code owns the P5 judgment/owner work (final live run on
+`claims.csv`, submission hygiene, `code/README.md`, the transcript narrative and
+interview prep) and is doing it in parallel — your P5-CX tasks do **not** block
+on the final `output.csv` existing, and CC's work does not block on you. Both are
+independent; the only hard gate is the user's live Azure run, which neither of us
+can do.
 
-Full specs for these will be appended here before each phase.
+Your P5-CX work is the **last automated gate before submission**: a standalone
+whole-file validator over `output.csv`, plus the transcript log-merge helper.
+Pure, deterministic, **stdlib only**, **no network, no `openai` import**. Both
+must self-test offline with **no live artifacts present** (fabricate inputs in
+`__main__`; if `output.csv` is absent the validator prints a clear message and
+exits 0, it never crashes).
+
+### P5-CX-1 — `code/evaluation/validate_output.py`
+
+A standalone, file-level gate over the emitted `output.csv`. This is **distinct
+from `code/validate.py`** (CC-owned), which flags **one row at a time inside the
+pipeline**. This script validates the **whole written file** as the evaluator
+will see it, and is the final check the owner runs before zipping. **Reuse**
+`validate.validate_row` for the per-row invariant pass — do **not** re-implement
+the invariant logic; single source of truth lives in `validate.py`.
+
+`def validate_output(output_path=config.OUTPUT_CSV, claims_path=config.CLAIMS_CSV) -> tuple[bool, list[str]]`
+returning `(ok, problems)`. Checks, each appending a clear human-readable string
+to `problems` (and `ok=False` on any **hard** failure):
+
+1. **File exists.** If `output_path` is absent: print `run code/main.py first to
+   produce output.csv`, return `(True, [])`, and `__main__` exits 0 (not a
+   failure — there is simply nothing to gate yet).
+2. **Exact header.** The CSV header equals `config.OUTPUT_COLUMNS` — same names,
+   same order, no extras, no missing. Report the first divergence precisely
+   (`col 5: got 'risk_flags' expected 'evidence_standard_met'`). Read with
+   `csv.reader` for the raw header (don't let `DictReader` mask order/dupes).
+3. **Row count.** Equals the `claims.csv` row count read via
+   `io_utils.read_claims(claims_path)` — **do not hardcode 44**.
+4. **Input fidelity (the "diff" gate).** For each row in file order, the four
+   **input** columns (`user_id`, `image_paths`, `user_claim`, `claim_object`)
+   must match `claims.csv` **exactly, row-for-row in file order** (architecture
+   decision #8 — never match on `user_id`, it has duplicates). This catches a
+   dropped/reordered/mangled row, which would silently misalign every prediction
+   against the evaluator's gold. Report the row index and field of the first
+   mismatch.
+5. **Vocab + format**, per row (reuse the allowed sets from `agent.prompts`:
+   `CLAIM_STATUS_VALUES`, `ISSUE_TYPE_VALUES`, `SEVERITY_VALUES`,
+   `OBJECT_PART_VALUES[claim_object]`, `RISK_FLAG_VALUES`): `claim_status`,
+   `issue_type`, `severity`, `object_part` in vocab; `evidence_standard_met` and
+   `valid_image` are exactly `true`/`false` (lowercase); every `;`-split token of
+   `risk_flags` is in `RISK_FLAG_VALUES` (or the field is `none`);
+   `supporting_image_ids` is `none` or `;`-joined ids that all appear in that
+   row's `image_paths` stems. No empty cells in the four free-text/decision
+   fields that must always be populated (`evidence_standard_met_reason`,
+   `claim_status_justification`).
+6. **Per-row invariants.** Run `validate.validate_row(row, row['claim_object'])`
+   for every row; collect any `schema`/`invariant` flags (ignore `norm`) into a
+   count summary so the owner sees how many rows the model left internally
+   inconsistent. These are **reported, not fixed** (decision #4) — they do not by
+   themselves set `ok=False` unless you decide a threshold; default: report-only,
+   and let `ok` be driven by checks 2–5. Document that choice in a comment.
+
+`__main__`: run `validate_output()`, print a readable PASS/FAIL summary (counts
+per check, first few problems), and **exit non-zero on `not ok`** so it can be a
+CI/pre-submission gate. The self-test must also fabricate a tiny good and a tiny
+bad `output.csv` in a temp dir and assert the bad one fails on the expected
+check (e.g. a reordered header, a dropped row, an off-vocab `severity`).
+
+### P5-CX-2 — `merge_codex_log.py` (repo root, **not** under `code/`)
+
+A small dev utility (it is **not** part of the evaluable solution, so keep it at
+repo root, not in `code/` — it must not end up in `code.zip`). The shared
+transcript log at `~/hackerrank_orchestrate/log.txt` (Windows:
+`%USERPROFILE%\hackerrank_orchestrate\log.txt`) is the submission's
+`chat_transcript`. Codex does **not** auto-append to it, so this reconciles a
+captured Codex session into the shared log per AGENTS.md §5.
+
+- Resolve the log path cross-platform via `pathlib.Path.home()` (AGENTS.md §7).
+  Never hardcode `/Users/...` or `C:\Users\...`.
+- `append_codex_section(session_text: str, *, label: str, log_path=None)` —
+  append `session_text` as a clearly delimited, labelled block:
+  ```text
+  ## [ISO-8601 TIMESTAMP] CODEX SESSION — <label>
+  <session_text, verbatim, secrets redacted>
+  ```
+  Append-only; **never** rewrite/reorder/delete prior entries (AGENTS.md §2).
+  Create the parent dir + file if missing. Write UTF-8 with `\n` line endings.
+- **Idempotency:** before appending, check whether a block with the same `label`
+  and an identical body already exists; if so, skip and report `already merged`.
+- **Redaction:** before writing, scrub anything matching common secret shapes
+  (`AZURE_OPENAI_API_KEY=...`, `sk-...`, bearer tokens, `api_key`/`apikey` lines)
+  to `[REDACTED]` (AGENTS.md §5.4). Never write a key to the log.
+- CLI: `python merge_codex_log.py --label "Codex P5-CX" path/to/codex_session.txt`
+  (reads the file, redacts, appends). `__main__` self-test: append to a **temp**
+  log file (never the real one), assert the section lands and a second identical
+  append is a no-op, and assert a fake key is redacted.
+
+When done, run both files' self-tests, then capture your Codex session and merge
+it into `log.txt` (use P5-CX-2 itself, labelled `Codex P5-CX`).
